@@ -1,181 +1,244 @@
 # Повторный экзамен #2: Сравнительный обзор 3 сущностей (Tavily)
 
-## Описание задания
+## Задание
 
-В этом проекте реализован **LangGraph‑агент**, который по запросу пользователя генерирует сравнительный обзор трёх сущностей (технологий, продуктов, подходов).  
-Обзор состоит из:
+Создать LangGraph‑агента, который по запросу студента строит **сравнительный обзор трёх сущностей** (технологий/продуктов/подходов) в формате:
 
-1. **Плана критериев** – 3–5 вопросов, по которым сравниваются сущности.  
-2. **Поиск по каждой сущности и критерию** – для каждой пары `entity × criterion` агент делает реальный веб‑поиск через Tavily и формирует краткую заметку.  
-3. **Финальная таблица** – Markdown‑таблица, где строки – критерии, столбцы – сущности, ячейки – найденные заметки.  
-4. **Вердикт** – рекомендация, какую сущность выбрать для конкретного кейса.
+1. Общий план →  
+2. По каждой сущности – Tavily‑поиск →  
+3. Финальная таблица + явный вердикт.
 
-> **Тема по умолчанию**: *«Сравни 3 векторные БД: Chroma, FAISS, Qdrant»*.
+Итоговый результат должен быть оформлен как **таблица 3×N** (строки — критерии, колонки — сущности) и **вердикт** по итогам сравнения. Супервизор сначала определяет, по каким критериям сравнивать.
 
-## Стек технологий
+---
 
-| Технология | Версия | Зачем |
-|------------|--------|-------|
-| Python | 3.10+ | Язык |
-| LangGraph | latest | Создание графа состояний |
-| LangChain OpenAI / Ollama | latest | LLM‑интеграция |
-| LangChain Tavily | latest | Веб‑поиск |
-| Tavily SDK | latest | Альтернатива LangChain |
-| python-dotenv | latest | Загрузка переменных окружения |
+## Стек
 
-### Установка зависимостей
+| Пакет | Версия | Зачем |
+|-------|--------|-------|
+| `langgraph` | ≥ 0.1.0 | Создание графа состояний |
+| `langchain-openai` / `langchain-ollama` | ≥ 0.2.0 | LLM‑ноды (ChatOpenAI, ChatOllama) |
+| `langchain-tavily` | ≥ 0.1.0 | Интеграция Tavily в LangChain |
+| `tavily-python` | ≥ 0.3.0 | SDK для прямого вызова API |
+| `python-dotenv` | ≥ 1.0.0 | Загрузка переменных окружения |
 
 ```bash
-# Создайте виртуальное окружение (рекомендовано)
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-# Установите зависимости
-pip install -r requirements.txt
+pip install langgraph langchain-openai langchain-tavily tavily-python python-dotenv
 ```
 
-`requirements.txt`
-
-```text
-langgraph
-langchain-openai
-langchain-tavily
-tavily-python
-python-dotenv
-```
-
-> **Важно**: Если вы используете Ollama вместо OpenAI, замените `langchain-openai` на `langchain-ollama` и настройте соответствующий провайдер в коде.
-
-## Конфигурация
-
-Создайте файл `.env` в корне проекта:
+В `.env` укажите:
 
 ```dotenv
-# Ключ API для Tavily
-TAVILY_API_KEY=YOUR_TAVILY_KEY
-
-# (Опционально) Ключ OpenAI
-OPENAI_API_KEY=YOUR_OPENAI_KEY
+TAVILY_API_KEY=YOUR_TAVILY_KEY_HERE
+OPENAI_API_KEY=YOUR_OPENAI_KEY   # если используете OpenAI
+# или OLLAMA_BASE_URL=http://localhost:11434  # если используете Ollama
 ```
 
-> **Тавили** – это сервис, который позволяет выполнять быстрый поиск по вебу. Ключ можно получить на https://tavily.com.
+---
 
-## Структура проекта
+## Что нужно сделать
 
-```
-.
-├── compare_agent.py   # Определение состояния, узлов и графа
-├── main.py            # Точка входа, CLI
-├── utils.py           # Вспомогательные функции
-├── .env.example       # Шаблон .env
-├── requirements.txt
-└── README.md
-```
-
-### `compare_agent.py`
+### 1. Состояние
 
 ```python
-from typing import TypedDict, Dict, List, Optional
-from langgraph.graph import StateGraph
-from langchain_openai import ChatOpenAI
-from langchain_tavily import TavilySearch
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from typing import TypedDict, List, Dict, Optional
 
-# ---------- 1. Состояние ----------
 class CompareState(TypedDict):
     entities: List[str]                # 3 имени для сравнения
     criteria: List[str]                # 3–5 критериев
     findings: Dict[str, List[str]]     # entity -> список заметок по критериям
     final_table: Optional[str]
     verdict: Optional[str]
-    # вспомогательные индексы для цикла
-    current_entity_idx: int
-    current_criterion_idx: int
+```
 
-# ---------- 2. Узлы ----------
+### 2. Узлы
+
+| Узел | Действие |
+|------|----------|
+| `plan_criteria` | LLM генерирует 3–5 критериев сравнения на основе списка `entities`. |
+| `research_entity` | Итеративно берёт очередную пару `(entity, criterion)`, делает Tavily‑поиск (или два шага: поиск + извлечение текста), формирует короткую заметку и добавляет её в `findings[entity]`. |
+| `build_table` | На основе `findings` строит Markdown‑таблицу: строки — критерии, колонки — сущности. |
+| `verdict` | LLM читает таблицу и выдаёт 2–4 предложения с рекомендацией по выбору сущности для конкретных кейсов. |
+
+### 3. Граф
+
+```
+START
+ └─> plan_criteria
+      └─> research_entity (loop until all entity×criterion pairs processed)
+           └─> build_table
+                └─> verdict
+                     └─> END
+```
+
+**Логика цикла:**
+
+```python
+while not all_pairs_processed(state):
+    state = await graph.nodes["research_entity"](state)
+```
+
+### 4. CLI‑демо
+
+Запуск без аргументов:
+
+```bash
+python main.py
+```
+
+Выводит:
+
+1. Сгенерированные критерии.
+2. Для каждой пары `entity × criterion` сообщение вида:  
+   `[Chroma × скорость] найдено: …`
+3. Итоговую Markdown‑таблицу.
+4. Вердикт.
+
+Опционально можно передать свои три сущности через аргументы:
+
+```bash
+python main.py --entities "LangChain" "LlamaIndex" "Haystack"
+```
+
+или в интерактивном режиме, если аргумент не указан.
+
+---
+
+## Критерии зачёта
+
+| Компонент | Что проверяется |
+|-----------|-----------------|
+| `plan_criteria` | LLM генерирует критерии динамически (не хардкод). |
+| Цикл `research_entity` | Пошаговый обход всех пар, накопление заметок в `findings`. |
+| Tavily | Реальный web‑search для каждой пары; ссылки/тексты не выдуманы. |
+| `build_table` | Markdown‑таблица с заполненными строками и колонками. |
+| `verdict` | Отдельный узел LLM, выдаёт явную рекомендацию. |
+| CLI | Запускается из командной строки, выводит все шаги. |
+
+---
+
+## Структура проекта
+
+```
+.
+├── .env
+├── main.py          # точка входа, CLI
+├── agent.py         # состояние, узлы, граф
+├── requirements.txt
+└── README.md        # это файл
+```
+
+### `main.py`
+
+```python
+import argparse
+from dotenv import load_dotenv
+from agent import build_agent
+
+def main():
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="Сравнительный обзор 3 сущностей")
+    parser.add_argument("--entities", nargs=3, help="Три сущности для сравнения")
+    args = parser.parse_args()
+
+    if not args.entities:
+        # интерактивный ввод
+        entities = input("Введите три сущности через запятую: ").split(",")
+        entities = [e.strip() for e in entities[:3]]
+    else:
+        entities = args.entities
+
+    agent = build_agent()
+    state = {"entities": entities, "criteria": [], "findings": {}, 
+             "final_table": None, "verdict": None}
+
+    # Запускаем граф
+    for event in agent.stream(state):
+        if event["type"] == "plan_criteria":
+            print("\nКритерии сравнения:")
+            for c in event["state"]["criteria"]:
+                print(f" - {c}")
+        elif event["type"] == "research_entity":
+            ent, crit = event["pair"]
+            note = event["note"]
+            print(f"[{ent} × {crit}] найдено: {note[:120]}...")
+        elif event["type"] == "build_table":
+            print("\nИтоговая таблица:")
+            print(event["state"]["final_table"])
+        elif event["type"] == "verdict":
+            print("\nВердикт:")
+            print(event["state"]["verdict"])
+
+if __name__ == "__main__":
+    main()
+```
+
+### `agent.py`
+
+```python
+from typing import TypedDict, List, Dict, Optional
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from langchain_tavily import TavilySearch
+import os
+
+class CompareState(TypedDict):
+    entities: List[str]
+    criteria: List[str]
+    findings: Dict[str, List[str]]
+    final_table: Optional[str]
+    verdict: Optional[str]
+
+# ---------- Узлы ----------
 def plan_criteria(state: CompareState) -> CompareState:
-    """LLM генерирует критерии сравнения."""
-    prompt = ChatPromptTemplate.from_template(
-        """
-        Сравни следующие сущности: {entities}.
-        Сформулируй 3–5 критериев, по которым можно сравнить их.  
-        Ответ в формате JSON: ["критерий1", "критерий2", ...]
-        """
-    )
     llm = ChatOpenAI()
-    chain = prompt | llm | JsonOutputParser()
-    criteria = chain.invoke({"entities": state["entities"]})
-    state["criteria"] = criteria
-    # Инициализируем индексы
-    state["current_entity_idx"] = 0
-    state["current_criterion_idx"] = 0
-    state["findings"] = {e: [] for e in state["entities"]}
+    prompt = f"Сгенерируй 3–5 критериев сравнения для следующих сущностей: {', '.join(state['entities'])}."
+    response = llm.invoke(prompt)
+    state["criteria"] = [c.strip() for c in response.split("\n") if c]
     return state
 
 def research_entity(state: CompareState) -> CompareState:
-    """Одна итерация: берёт текущую пару entity × criterion,
-    делает Tavily‑поиск и сохраняет заметку."""
-    entity = state["entities"][state["current_entity_idx"]]
-    criterion = state["criteria"][state["current_criterion_idx"]]
-    query = f"{entity} {criterion}"
-    tavily = TavilySearch()
-    result = tavily.invoke({"query": query, "max_results": 3})
-    # Берём первые 3 фрагмента и формируем краткую заметку
-    snippets = [r["content"][:200] for r in result["results"]]
-    note = f"{criterion}: " + "; ".join(snippets)
-    state["findings"][entity].append(note)
-
-    # Обновляем индексы
-    state["current_criterion_idx"] += 1
-    if state["current_criterion_idx"] >= len(state["criteria"]):
-        state["current_criterion_idx"] = 0
-        state["current_entity_idx"] += 1
-
-    return state
+    # Находим первую непроработанную пару
+    for entity in state["entities"]:
+        if entity not in state["findings"]:
+            state["findings"][entity] = []
+        for crit in state["criteria"]:
+            if len(state["findings"][entity]) < len(state["criteria"]):
+                # Выполняем Tavily‑поиск
+                tavily = TavilySearch()
+                query = f"{entity} {crit}"
+                result = tavily.run(query)
+                snippet = result[0]["content"][:200] if result else "Нет данных"
+                state["findings"][entity].append(snippet)
+                # Возвращаем событие для CLI
+                return {"type": "research_entity", "pair": (entity, crit), "note": snippet}
+    return {"type": "build_table"}
 
 def build_table(state: CompareState) -> CompareState:
-    """Формирует Markdown‑таблицу из найденных заметок."""
-    headers = ["Критерий"] + state["entities"]
     rows = []
     for crit in state["criteria"]:
         row = [crit]
         for ent in state["entities"]:
-            # Берём заметку по этому критерию (если есть)
-            notes = state["findings"][ent]
-            # Находим заметку, начинающуюся с критерия
-            note = next((n for n in notes if n.startswith(crit)), "")
+            notes = state["findings"].get(ent, [])
+            idx = state["criteria"].index(crit)
+            note = notes[idx] if idx < len(notes) else ""
             row.append(note.replace("\n", " "))
-        rows.append(row)
-
-    # Формируем таблицу
-    table = "| " + " | ".join(headers) + " |\n"
-    table += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-    for r in rows:
-        table += "| " + " | ".join(r) + " |\n"
-
+        rows.append("| " + " | ".join(row) + " |")
+    header = "| Критерий | " + " | ".join(state["entities"]) + " |"
+    separator = "|" + "---|" * (len(state["entities"]) + 1)
+    table = "\n".join([header, separator] + rows)
     state["final_table"] = table
-    return state
+    return {"type": "build_table", "state": state}
 
 def verdict(state: CompareState) -> CompareState:
-    """LLM формирует рекомендацию."""
-    prompt = ChatPromptTemplate.from_template(
-        """
-        На основе следующей таблицы сравнения:
-        {table}
-        Напиши 2–4 предложения, в которых:
-        1. Кратко резюмируешь сильные и слабые стороны каждой сущности.
-        2. Рекомендовал бы, какую из них выбрать для кейса «{case}».
-        """
-    )
     llm = ChatOpenAI()
-    chain = prompt | llm
-    result = chain.invoke({"table": state["final_table"], "case": "выбор векторной БД для небольшого проекта"})
-    state["verdict"] = result
-    return state
+    prompt = f"На основе следующей таблицы:\n{state['final_table']}\n\nСформулируй 2–4 предложения с рекомендацией, какая сущность лучше подходит для разных кейсов."
+    response = llm.invoke(prompt)
+    state["verdict"] = response
+    return {"type": "verdict", "state": state}
 
-# ---------- 3. Граф ----------
-def build_graph() -> StateGraph:
+# ---------- Граф ----------
+def build_agent():
     graph = StateGraph(CompareState)
 
     graph.add_node("plan_criteria", plan_criteria)
@@ -183,137 +246,56 @@ def build_graph() -> StateGraph:
     graph.add_node("build_table", build_table)
     graph.add_node("verdict", verdict)
 
+    # Переходы
     graph.set_entry_point("plan_criteria")
     graph.add_edge("plan_criteria", "research_entity")
     graph.add_conditional_edges(
         "research_entity",
-        lambda state: "research_entity" if state["current_entity_idx"] < len(state["entities"])
-        else "build_table",
+        lambda x: "build_table" if x["type"] == "build_table" else "research_entity",
     )
     graph.add_edge("build_table", "verdict")
-    graph.add_edge("verdict", "__end__")
+    graph.add_edge("verdict", END)
 
-    return graph
+    return graph.compile()
 ```
 
-### `main.py`
+### `requirements.txt`
 
-```python
-import os
-from dotenv import load_dotenv
-from compare_agent import build_graph, CompareState
-
-def main():
-    load_dotenv()
-    # Опциональный ввод пользовательских сущностей
-    default_entities = ["Chroma", "FAISS", "Qdrant"]
-    user_input = input(
-        f"Введите 3 сущности через запятую (или нажмите Enter для {default_entities}): "
-    )
-    if user_input.strip():
-        entities = [e.strip() for e in user_input.split(",") if e.strip()]
-        if len(entities) != 3:
-            print("Нужно ровно 3 сущности.")
-            return
-    else:
-        entities = default_entities
-
-    # Инициализируем состояние
-    state: CompareState = {
-        "entities": entities,
-        "criteria": [],
-        "findings": {},
-        "final_table": None,
-        "verdict": None,
-        "current_entity_idx": 0,
-        "current_criterion_idx": 0,
-    }
-
-    graph = build_graph()
-    final_state = graph.invoke(state)
-
-    # Выводим результаты
-    print("\n=== Критерии сравнения ===")
-    for c in final_state["criteria"]:
-        print(f"- {c}")
-
-    print("\n=== Поиск по каждой паре ===")
-    for ent in entities:
-        for note in final_state["findings"][ent]:
-            print(f"[{ent} × {note.split(':')[0]}] найдено: {note.split(':', 1)[1].strip()}")
-
-    print("\n=== Финальная таблица ===")
-    print(final_state["final_table"])
-
-    print("\n=== Вердикт ===")
-    print(final_state["verdict"])
-
-if __name__ == "__main__":
-    main()
+```text
+langgraph>=0.1.0
+langchain-openai>=0.2.0
+langchain-tavily>=0.1.0
+tavily-python>=0.3.0
+python-dotenv>=1.0.0
 ```
 
-### `utils.py`
-
-```python
-# В этом проекте вспомогательные функции не требуются,
-# но можно добавить, например, форматирование таблицы.
-```
+---
 
 ## Как запустить
 
 ```bash
+# 1. Создайте виртуальное окружение (необязательно)
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+# 2. Установите зависимости
+pip install -r requirements.txt
+
+# 3. Скопируйте ваш Tavily‑ключ в .env
+echo "TAVILY_API_KEY=YOUR_KEY" > .env
+
+# 4. Запустите демо
 python main.py
 ```
 
-Вы увидите:
+Вы увидите пошаговый вывод: критерии, результаты поиска для каждой пары, итоговую таблицу и вердикт.
 
-1. Список критериев.  
-2. Для каждой пары `entity × criterion` краткое резюме.  
-3. Markdown‑таблица сравнения.  
-4. Рекомендацию (вердикт).
+---
 
-## Как это работает
+## Что дальше?
 
-1. **Планирование критериев**  
-   - `plan_criteria` использует LLM, чтобы сгенерировать релевантные критерии, основываясь на названиях сущностей.  
-   - Критерии сохраняются в `state["criteria"]`.
+- Добавьте поддержку Ollama вместо OpenAI (поменяйте `ChatOpenAI` на `ChatOllama`).
+- Расширьте `research_entity`, чтобы обрабатывать несколько результатов и выбирать наиболее релевантный.
+- Внедрите кэширование запросов, чтобы не делать лишние вызовы Tavily при повторных запусках.
 
-2. **Итеративный поиск**  
-   - `research_entity` последовательно обрабатывает каждую пару `entity × criterion`.  
-   - Для каждой пары выполняется Tavily‑поиск (3 результата), из которых формируется краткая заметка.  
-   - Заметки добавляются в `state["findings"][entity]`.  
-   - После каждой итерации индексы обновляются; если все пары обработаны, переход к `build_table`.
-
-3. **Формирование таблицы**  
-   - `build_table` строит Markdown‑таблицу: строки – критерии, столбцы – сущности.  
-   - Таблица сохраняется в `state["final_table"]`.
-
-4. **Вердикт**  
-   - `verdict` передаёт таблицу LLM, который генерирует рекомендации.  
-   - Результат сохраняется в `state["verdict"]`.
-
-## Проверка качества
-
-| Компонент | Что проверяется |
-|-----------|-----------------|
-| `plan_criteria` | LLM генерирует критерии, а не использует хардкод |
-| Цикл `research_entity` | Пошаговый обход всех пар, `findings` накапливается |
-| Tavily | Реальный веб‑поиск, ссылки не выдуманы |
-| `build_table` | Markdown‑таблица полностью заполнена |
-| `verdict` | Явная рекомендация, 2–4 предложения |
-| CLI | Выводит все этапы, работает с пользовательским вводом |
-
-## Возможные улучшения
-
-- **Кеширование**: чтобы не делать повторный поиск для одинаковых запросов.  
-- **Параллелизация**: использовать `async` для ускорения поиска.  
-- **Более сложный парсинг**: извлекать ключевые фразы из результатов, а не просто первые 200 символов.  
-- **Интерактивный режим**: добавить меню выбора кейса для вердикта.  
-
-## Лицензия
-
-MIT License – свободно используйте и модифицируйте.
-
---- 
-
-**Удачной работы!**
+Удачной разработки!
